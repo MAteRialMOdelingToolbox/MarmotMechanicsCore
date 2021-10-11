@@ -1,4 +1,5 @@
 #include "Marmot/B3.h"
+#include "Marmot/B3Shrinkage.h"
 #include "Marmot/MarmotElasticity.h"
 #include "Marmot/MarmotMaterialHypoElastic.h"
 #include "Marmot/MarmotTypedefs.h"
@@ -17,26 +18,35 @@ namespace Marmot::Materials {
   B3::B3( const double* materialProperties, int nMaterialProperties, int materialLabel )
     : MarmotMaterialHypoElastic( materialProperties, nMaterialProperties, materialLabel ),
       // clang-format off
-      nu                      ( materialProperties[0] ),
-      q1                      ( materialProperties[1] ),
-      q2                      ( materialProperties[2] ),
-      q3                      ( materialProperties[3] ),
-      q4                      ( materialProperties[4] ),
-      q5                      ( materialProperties[5] ),
-      hEnv                    ( materialProperties[6] ),
-      shrinkageHalfTime       ( materialProperties[7] ),
-      ultimateShrinkageStrain ( materialProperties[8] ),
-      n                       ( materialProperties[9] ),
-      m                       ( materialProperties[10] ),
-      nKelvinBasic            ( static_cast< size_t > ( materialProperties[11] ) ),
-      minTauBasic             ( materialProperties[12] ),
-      nKelvinDrying           ( static_cast< size_t > ( materialProperties[13] ) ),
-      minTauDrying            ( materialProperties[14] ),
-      dryingStart             ( materialProperties[15] ),
-      dTStatic                ( materialProperties[16] ),
-      timeToDays              ( materialProperties[17] ),
-      castTime                ( materialProperties[18] ),
-      solidificationParameters ( { q1, q2, q3, q4, n, m } )
+      // elastic parameters
+      nu                                ( materialProperties[0] ),
+      // basic creep parameters
+      q1                                ( materialProperties[1] ),
+      q2                                ( materialProperties[2] ),
+      q3                                ( materialProperties[3] ),
+      q4                                ( materialProperties[4] ),
+      n                                 ( materialProperties[5] ),
+      m                                 ( materialProperties[6] ),
+      nKelvinBasic                      ( static_cast< size_t > ( materialProperties[7] ) ),
+      minTauBasic                       ( materialProperties[8] ),
+      // shrinkage parameters
+      autogenousShrinkageHalfTime       ( materialProperties[9] ),
+      ultimateAutogenousShrinkageStrain ( materialProperties[10] ),
+      alpha                             ( materialProperties[11] ),
+      rt                                ( materialProperties[12] ),
+      // shrinkage parameters
+      dryingShrinkageHalfTime           ( materialProperties[13] ),
+      ultimateDryingShrinkageStrain     ( materialProperties[14] ),
+      dryingStart                       ( materialProperties[15] ),
+      // drying creep paramters
+      q5                                ( materialProperties[16] ),
+      hEnv                              ( materialProperties[17] ),
+      nKelvinDrying                     ( static_cast< size_t > ( materialProperties[18] ) ),
+      minTauDrying                      ( materialProperties[19] ),
+      // additional parameters
+      timeToDays                        ( materialProperties[20] ),
+      castTime                          ( materialProperties[21] ),
+      solidificationParameters          ( { q1, q2, q3, q4, n, m } )
   // clang-format on
   {
     solidificationKelvinProperties.retardationTimes = KelvinChain::generateRetardationTimes( nKelvinBasic,
@@ -52,6 +62,9 @@ namespace Marmot::Materials {
 
     solidificationKelvinProperties
       .E0 = SolidificationTheory::computeZerothElasticModul( minTauBasic, n, basicCreepComplianceApproximationOrder );
+
+    std::cout << "E0 = " << solidificationKelvinProperties.E0 << std::endl;
+    std::cout << "E_mu = " << solidificationKelvinProperties.elasticModuli << std::endl;
   }
 
   void B3::computeStress( double*       stress,
@@ -71,9 +84,9 @@ namespace Marmot::Materials {
       return;
     }
 
-    Eigen::Ref< Solidification::mKelvinStateVarMatrix > basicCreepStateVars(
+    Eigen::Ref< KelvinChain::mapStateVarMatrix > basicCreepStateVars(
       ( stateVarManager->kelvinStateVars ).leftCols( nKelvinBasic ) );
-    Eigen::Ref< Solidification::mKelvinStateVarMatrix > dryingCreepStateVars(
+    Eigen::Ref< KelvinChain::mapStateVarMatrix > dryingCreepStateVars(
       ( stateVarManager->kelvinStateVars ).rightCols( nKelvinDrying ) );
 
     const double dTimeDays  = dT * timeToDays;
@@ -92,12 +105,12 @@ namespace Marmot::Materials {
                                                           solidificationKelvinProperties,
                                                           basicCreepStateVars );
 
-    // compute drying creep strains and compliance
+    // compute drying creep strains and compliancei
     KelvinChain::Properties dryingCreepRetardationTimes = KelvinChain::generateRetardationTimes( nKelvinDrying,
                                                                                                  minTauDrying,
                                                                                                  sqrt( 10. ) );
     double                  b                           = 8. * ( 1. - hEnv );
-    double                  xiZero = std::min( -1e-16, ( dryingStart - timeOld[1] - dT / 2. ) / shrinkageHalfTime );
+    double xiZero = std::min( -1e-16, ( dryingStart - tStartDays - dTimeDays / 2. ) / dryingShrinkageHalfTime );
 
     auto phiDrying = [&]( autodiff::Real< dryingCreepComplianceApproximationOrder, double > tau ) {
       return phi( tau, b, xiZero );
@@ -109,7 +122,7 @@ namespace Marmot::Materials {
     Vector6d dryingCreepStrainIncrement = Vector6d::Zero();
     double   dryingCreepCompliance      = 0;
 
-    KelvinChain::evaluateKelvinChain( dTimeDays,
+    KelvinChain::evaluateKelvinChain( dTimeDays / dryingShrinkageHalfTime,
                                       dryingCreepElasticModuli,
                                       dryingCreepRetardationTimes,
                                       dryingCreepStateVars,
@@ -121,11 +134,25 @@ namespace Marmot::Materials {
                                  basicCreepUniaxialComplianceComponents.viscoelastic +
                                  basicCreepUniaxialComplianceComponents.flow + dryingCreepCompliance;
 
-    C                    = ContinuumMechanics::Elasticity::Isotropic::stiffnessTensor( 1. / effectiveCompliance, nu );
-    Vector6d deltaStress = C * ( dE - basicCreepStrainIncrement - dryingCreepStrainIncrement );
-    nomStress            = nomStress + deltaStress;
+    // compute shrinkage strain increment
+    Vector6d
+      shrinkageStrainIncrement = Shrinkage::B3::computeShrinkageStrainIncrement( tStartDays,
+                                                                                 dTimeDays,
+                                                                                 ultimateAutogenousShrinkageStrain,
+                                                                                 autogenousShrinkageHalfTime,
+                                                                                 alpha,
+                                                                                 rt,
+                                                                                 ultimateDryingShrinkageStrain,
+                                                                                 dryingShrinkageHalfTime,
+                                                                                 1. - hEnv * hEnv * hEnv,
+                                                                                 dryingStart );
 
-    KelvinChain::updateStateVarMatrix( dTimeDays,
+    C                    = ContinuumMechanics::Elasticity::Isotropic::stiffnessTensor( 1. / effectiveCompliance, nu );
+    Vector6d deltaStress = C *
+                           ( dE - basicCreepStrainIncrement - dryingCreepStrainIncrement - shrinkageStrainIncrement );
+    nomStress = nomStress + deltaStress;
+
+    KelvinChain::updateStateVarMatrix( dTimeDays / dryingShrinkageHalfTime,
                                        dryingCreepElasticModuli,
                                        dryingCreepRetardationTimes,
                                        dryingCreepStateVars,

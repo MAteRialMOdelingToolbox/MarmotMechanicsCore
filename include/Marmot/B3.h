@@ -27,8 +27,8 @@
 
 #pragma once
 #include "Marmot/MarmotKelvinChain.h"
-#include "Marmot/MarmotSolidification.h"
 #include "Marmot/MarmotMaterialHypoElastic.h"
+#include "Marmot/MarmotSolidification.h"
 #include "Marmot/MarmotStateVarVectorManager.h"
 #include <iostream>
 #include <string>
@@ -38,23 +38,37 @@ namespace Marmot::Materials {
 
   class B3 : public MarmotMaterialHypoElastic {
 
+    // elasticity
     const double& nu;
+
+    // basic creep
     const double& q1;
     const double& q2;
     const double& q3;
     const double& q4;
-    const double& q5;
-    const double& hEnv;
-    const double& shrinkageHalfTime;
-    const double& ultimateShrinkageStrain;
     const double& n;
     const double& m;
     const size_t  nKelvinBasic;
     const double& minTauBasic;
+
+    // autogenous shrinkage
+    const double& autogenousShrinkageHalfTime;
+    const double& ultimateAutogenousShrinkageStrain;
+    const double& alpha;
+    const double& rt;
+
+    // drying shrinkage
+    const double& dryingShrinkageHalfTime;
+    const double& ultimateDryingShrinkageStrain;
+    const double& dryingStart;
+
+    // drying creep
+    const double& q5;
+    const double& hEnv;
     const size_t  nKelvinDrying;
     const double& minTauDrying;
-    const double& dryingStart;
-    const double& dTStatic;
+
+    // time parameters
     const double& timeToDays;
     const double& castTime;
 
@@ -93,14 +107,14 @@ namespace Marmot::Materials {
     StateView getStateView( const std::string& stateName );
 
   private:
-    SolidificationTheory::Parameters solidificationParameters;
+    SolidificationTheory::Parameters            solidificationParameters;
     SolidificationTheory::KelvinChainProperties solidificationKelvinProperties;
-    
+
     KelvinChain::Properties basicCreepElasticModuli;
     KelvinChain::Properties basicCreepRetardationTimes;
 
     static constexpr int dryingCreepComplianceApproximationOrder = 5;
-    static constexpr int basicCreepComplianceApproximationOrder  = 3;
+    static constexpr int basicCreepComplianceApproximationOrder  = 2;
 
     template < typename T_ >
     T_ phi( T_ xi, double b, double xiZero )
